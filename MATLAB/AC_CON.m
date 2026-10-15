@@ -108,6 +108,7 @@ Y_a = [dq(1), a_r(1), coupling_1, gravity_1, sum_ar, gravity_12, 0; ...
 tau_model = Y_a*pi_hat;
 tau_feedback = -Ks*s;
 tau_cmd = tau_model + tau_feedback;
+
 if adapt
     dpi_hat = -Gamma*Y_a.'*s;
 else

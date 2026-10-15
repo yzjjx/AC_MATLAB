@@ -4,15 +4,12 @@
 % 运行顺序：RNEA_SYM; generate_Y_pi;
 % 也可以先运行 data_verify，但 q、dq、ddq 和待辨识参数必须保留为符号。
 % 本脚本不修改 tau；pi_param 表示参数向量，避免覆盖 MATLAB 的常数 pi。
+% 输入约定：tau 为非零符号列向量；运动变量及待辨识物理参数均保留为符号。
+% 参数须以多项式形式出现，例如 m、m*lc、m*lc^2、Izz。
+% known_values 应取正常、非退化的模型数值，供数值选基使用。
+% 本脚本沿用前置模型的输入约定，不重复检查工作区变量的存在、类型和形状。
 
-% 无意义判断
-% =============================================================================================
-if ~exist('tau', 'var') || ~isa(tau, 'sym') || ~iscolumn(tau)
-    error('generate_Y_pi:InvalidTau', '请先在工作区生成符号列向量 tau。');
-end
-if ~exist('mat_q', 'var') || ~exist('mat_dq', 'var') || ~exist('mat_ddq', 'var')
-    error('generate_Y_pi:MissingMotion', '工作区需要 mat_q、mat_dq、mat_ddq。');
-end
+%% 输入：读取已有力矩和运动符号
 tau_for_Y = tau;
 joint_count = numel(tau_for_Y);
 motion_symbols = [mat_q(:); mat_dq(:); mat_ddq(:)];
@@ -30,19 +27,19 @@ random_seed = 0;
 rank_tol = 1e-10;                 % 列归一化后的相对秩阈值
 parameter_symbols = setdiff(symvar(tau_for_Y).', ...
                             [motion_symbols; known_symbols], 'stable');
-if isempty(parameter_symbols)
-    error('generate_Y_pi:NoParameters', 'tau 中没有保留符号形式的待辨识参数。');
-end
+% symvar 提取 tau 中的全部符号；setdiff 排除运动量和已知量。
+% stable 保留原有顺序，使后续参数排列可复现。
 
 %% 1. 先随机代入 q、dq、ddq，得到仍含未知物理参数的 tau_samples
 % 采样次数取 20 与参数符号数量四倍中的较大值；符号包括 m、L、lc、Izz 等。
 n_samples = max(20, 4*numel(parameter_symbols)); % 可增加采样数量
 
-% sample_stream为随机数生成器，随机数生成算法为mt19937ar，随机数种子为random_seed
+% 独立随机流保证结果可复现，也不改变 MATLAB 全局随机流。
 sample_stream = RandStream('mt19937ar', 'Seed', random_seed);
 
 % 令 q = 2*atan(有理数)，使 sin(q)、cos(q) 可精确化为有理数。
 % 这样既能随机采样，也避免用浮点数拼出近似的参数组合。
+% 依据半角公式：sin(q)=2*t/(1+t^2)，cos(q)=(1-t^2)/(1+t^2)。
 half_angle_tan = sym(randi(sample_stream, [-100, 100], ...
                            joint_count, n_samples))/20;
 q_samples_exact = 2*atan(half_angle_tan);
@@ -55,7 +52,7 @@ ddq_samples_exact = sym(randi(sample_stream, [-10, 10], ...
 % 生成随机运动状态矩阵，每列为一次实验的 q、dq、ddq 
 motion_samples_exact = [q_samples_exact; dq_samples_exact; ddq_samples_exact];
 
-% 转换为double，可以绘图显示这个q和dq和ddq这些随机数
+% 以下 double 副本仅供查看或绘图；符号力矩采样仍使用上面的精确值。
 q_samples = double(q_samples_exact);
 dq_samples = double(dq_samples_exact);
 ddq_samples = double(ddq_samples_exact);
@@ -76,7 +73,8 @@ end
 % 存储动力学方程出现的全部参数单项式，theta_full
 theta_full = sym(zeros(0, 1));
 
-% N*S,N为关节数，S为随机输入次数，存储每一个参数单项式对应的系数
+% N 个关节、S 次采样、P 个参数单项式：W_symbolic 的维度为 (N*S)×P。
+% 每次采样占连续 N 行，因此 W_symbolic*theta_full = tau_samples(:)。
 W_symbolic = sym(zeros(joint_count*n_samples, 0));
 
 % 记录已经出现过哪些参数单项式，防止重复添加
@@ -86,16 +84,14 @@ term_names = {};
 for sample_idx = 1:n_samples
     for joint_idx = 1:joint_count
         row_idx = (sample_idx-1)*joint_count + joint_idx;
-        % expand用于展开所有计算，tau_samples为2行28列的数据
-        % coeffs用来分解成系数和单项式，[C, T] = coeffs(tau, [m1,m2,lc2,Izz1]);
-        % 例如2m_1，就会被分解成C为2，T为m_1
+        % expand 展开参数乘积，coeffs 按 parameter_symbols 提取系数和单项式。
+        % 例如 2*m1 + 3*m2*lc2 对应系数 [2,3]、单项式 [m1,m2*lc2]
+        % （实际返回顺序由 coeffs 决定，系数与单项式始终一一对应）。
         [term_coefficients, parameter_terms] = ...
             coeffs(expand(tau_samples(joint_idx, sample_idx)), parameter_symbols);
         
         for term_idx = 1:numel(parameter_terms)
-            % 转换为char字符串，因为同一个参数可能出现在不同关节和采样中
-            % ismember用来确定 A 的哪些行同时也在 B 中及其在 B 中的相应位置
-            % 例如 m_1 在 28 次采样中可能出现很多次，但 theta_full 中只需要记录一次
+            % 用单项式的字符形式查找列号；同一单项式跨关节、跨采样共用一列。
             term_name = char(parameter_terms(term_idx));
             [found, column_idx] = ismember(term_name, term_names);
 
@@ -119,47 +115,39 @@ parameter_count = numel(theta_full);
 % SVD 用来解释有多少个独立参数组合，QR 用来选择哪几列作为基，而符号线性方程求解用来表示这些参数如何组合
 % SVD 判断数值秩，QR 选择主元；参数关系随后由精确符号运算得到。
 
-% 首先代入已知的数值参数，如重力等，生成数值矩阵 W_scaled，用于 SVD 和 QR
+% 只在数值选基时将已知量代入；W_symbolic 仍保留这些符号。
 W = double(subs(W_symbolic, known_symbols, known_values));
 % 列归一化：每列除以其二范数，避免量纲差异导致的数值秩判断错误
-% 假如W = [1000 0.001;2000 0.002],避免第一列的数值过大导致第二列被忽略，归一化后W_scaled = [1 1;2 2]
+% 例如 W=[1000 0.001;2000 0.002]，归一化后两列均为 [1;2]/sqrt(5)。
 column_scale = vecnorm(W, 2, 1);
+% 已知量取特定值时可能出现零列；将其除数设为 1，防止 0/0。
 column_scale(column_scale == 0) = 1;
-% 列归一化，通过这种归一化的方式，每列的二范数为1
+% 非零列的二范数变为 1；零列保持为零。可逆列缩放不改变矩阵秩。
 W_scaled = W ./ column_scale;
 
 % SVD：返回按降序排列的奇异值，超过相对阈值的数量就是数值秩。
 % 数值秩 n_base 决定需要保留多少个独立参数组合。
 singular_values = svd(W_scaled);
-% 如果第三列可以由前面两列表示，则奇异值第三个为0，n_base=2
-
-if isempty(singular_values) || singular_values(1) == 0
-    svd_threshold = 0;
-    n_base = 0;
-else
-    % 设置阈值进行判断，如果奇异值小于阈值，则认为是线性相关的，n_base为独立参数组合的数量
-    svd_threshold = rank_tol*singular_values(1);
-    n_base = sum(singular_values > svd_threshold);
-end
+% 对有效的非零动力学模型，最大奇异值大于零，无须单独处理空/零模型。
+% 数值计算中相关列对应的奇异值通常接近零，因此用相对阈值计数。
+svd_threshold = rank_tol*singular_values(1);
+n_base = sum(singular_values > svd_threshold);
 
 % 带列置换的 QR：按独立性选择原矩阵的列，保留前 n_base 个列号。
-% 假设SVD已经找出矩阵秩为5，那么在原来的N列里面，选择哪5列作为独立参数组合
-% QR分解的列置换可以帮助选择这些独立的列
-[~, R_sample, column_order] = qr(W_scaled, 'vector');
+% SVD 给出数量，QR 给出具体列号；排序只让输出沿用原单项式顺序。
+[~, ~, column_order] = qr(W_scaled, 'vector');
 base_columns = sort(column_order(1:n_base));
 
-if n_base == 0
-    parameter_map = sym(zeros(0, parameter_count));
-else
-    % 第二次 QR：转置后选列，等价于在原矩阵中选独立采样行。
-    % 选出 n_base 行，使主元列对应的子矩阵成为可逆方阵。
-    [~, ~, row_order] = qr(W_scaled(:, base_columns).', 'vector');
-    exact_rows = row_order(1:n_base);
-    A_exact = W_symbolic(exact_rows, :);
-    % pi_param = parameter_map*theta_full；主元列构成单位矩阵。
-    % g 和已知几何符号在这里不被数值替换。
-    parameter_map = simplify(A_exact(:, base_columns) \ A_exact);
-end
+% 第二次 QR：转置后选列，等价于在原矩阵中选独立采样行。
+% 选出 n_base 行，使主元列对应的子矩阵成为可逆方阵。
+[~, ~, row_order] = qr(W_scaled(:, base_columns).', 'vector');
+exact_rows = row_order(1:n_base);
+A_exact = W_symbolic(exact_rows, :);
+% 令 B=A_exact(:,base_columns)，解 B*K=A_exact，得到参数映射 K。
+% 使用原始精确符号系数求解，不使用浮点 QR 的 R，也不显式计算 inv(B)。
+% K(:,base_columns)=eye(n_base)，pi_param=K*theta_full。
+% g 和已知几何符号在这里不被数值替换。
+parameter_map = simplify(A_exact(:, base_columns) \ A_exact);
 pi_param = simplify(parameter_map*theta_full);
 
 %% 3. 再回到原始符号 tau，通过系数匹配反推符号回归矩阵 Y
@@ -185,6 +173,8 @@ Y_full = simplify(Y_full);
 Y = Y_full(:, base_columns);
 
 %% 4. 符号验证：参数组合固定，且对任意运动状态满足原动力学
+% 随机样本只负责寻找候选基，最终必须回到原符号表达式验证恒等式。
+% 第一项核对全部单项式系数；第二项核对最终力矩；has 排除运动量混入参数。
 regressor_residual = simplify(expand(Y_full - Y*parameter_map));
 tau_Y_pi = simplify(Y*pi_param);
 tau_residual = simplify(expand(tau_for_Y - tau_Y_pi));
@@ -202,5 +192,5 @@ disp(pi_param);
 disp('反推得到的符号回归矩阵 Y =');
 disp(Y);
 disp('前三次随机实验的符号力矩（每列为一次实验）=');
-disp(tau_samples(:, 1:min(3, n_samples)));
+disp(tau_samples(:, 1:3));
 disp('验证通过：tau - Y*pi_param = 0。');

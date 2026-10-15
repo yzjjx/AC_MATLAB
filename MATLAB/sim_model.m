@@ -45,6 +45,7 @@ function [dq_out, q_out] = sim_model(tau_cmd, reset, robot_params, q_init, dq_in
 persistent q_state dq_state robot_state
 
 % yzj_add_annotation：判断
+% yzj_add_annotation：nargin 是 MATLAB 内置变量，表示调用该函数时实际传入多少个输入参数
 if nargin < 2 || isempty(reset)
     reset = false;
 end
@@ -72,6 +73,7 @@ if ~initializing && (~isempty(robot_params) || ~isempty(q_init) || ~isempty(dq_i
 end
 
 %% 2. 准备 N 杆参数；空间惯量只在初始化/重置时计算
+% 三个分支，如果提供了机器人参数；没有提供新参数，但是已经存在机器人模型；没有新参数，也没有保存的模型
 if initializing
     if ~isempty(robot_params)
         candidate_robot = prepare_robot(robot_params);
